@@ -46,13 +46,14 @@ object ServiceLoaderLite {
                     throw IllegalArgumentException("Only local URLs are supported, got ${url.protocol}")
                 }
             }
+
+        // On Android the service jars (e.g. compiler plugins loaded by Sketchware) are dexed and cannot be
+        // opened through a java.net.URLClassLoader (ART has no usable URLClassLoader for dex/jar). Use the
+        // platform PathClassLoader to resolve implementation classes from those roots instead.
         if (isDalvik()) {
             val classpath =
-                classLoader.urLs.joinToString(separator = File.pathSeparator) {
-                    it.path
-                }
+                classLoader.urLs.joinToString(separator = File.pathSeparator) { it.path }
             val loader = PathClassLoader(classpath, this::class.java.classLoader)
-
             return loadImplementations(service, files, loader)
         }
 
@@ -65,15 +66,19 @@ object ServiceLoaderLite {
         classLoader: ClassLoader,
     ): MutableList<Service> {
         val implementations = mutableListOf<Service>()
+
         for (className in findImplementations(service, files)) {
-            try {
-                val instance =
-                    classLoader.loadClass(className).getConstructor()
-                        .newInstance()
-                implementations += service.cast(instance)
-            } catch (e: ClassNotFoundException) {
-                throw ClassNotFoundException("Unable to find class $className in $files")
-            }
+            // Match upstream on the JVM (Class.forName + no-arg newInstance). On Dalvik/ART load through
+            // the (dex-aware) classloader and instantiate via the public no-arg constructor mandated by
+            // the ServiceLoader contract; Class.newInstance() can throw IllegalAccessException for
+            // non-public services and behaves inconsistently across ART releases.
+            val instance =
+                if (isDalvik()) {
+                    classLoader.loadClass(className).getConstructor().newInstance()
+                } else {
+                    Class.forName(className, false, classLoader).newInstance()
+                }
+            implementations += service.cast(instance)
         }
 
         return implementations

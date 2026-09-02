@@ -1,4 +1,6 @@
 import org.gradle.api.tasks.*
+import org.gradle.api.GradleException
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.objectweb.asm.*
 import org.objectweb.asm.commons.*
 import java.util.jar.*
@@ -7,14 +9,7 @@ import java.util.zip.*
 buildscript {
     repositories {
         gradlePluginPortal()
-        google()
         mavenCentral()
-        maven { url "https://jitpack.io" }
-        maven { url "https://plugins.gradle.org/m2/" }
-        maven { url 'https://repo.jenkins-ci.org/public/' }
-        maven { url 'https://repo.gradle.org/gradle/libs-releases' }
-
-        mavenLocal()
     }
     dependencies {
         classpath "org.ow2.asm:asm:9.8"
@@ -26,34 +21,27 @@ buildscript {
 
 plugins {
     id 'java-library'
-    id 'org.jetbrains.kotlin.jvm' version '2.0.21'
+    id 'org.jetbrains.kotlin.jvm' version '2.4.10'
     id 'com.diffplug.spotless' version '7.0.3'
-    id 'org.jlleitschuh.gradle.ktlint' version '12.1.0'   
-    id 'com.github.johnrengelman.shadow' version '8.1.1' 
-    id 'maven-publish'       
+    id 'org.jlleitschuh.gradle.ktlint' version '12.1.0'
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
+    id 'maven-publish'
 }
+
+ext.kotlinVersion = '2.4.10'
 
 repositories {
-    gradlePluginPortal()
-    google()
     mavenCentral()
-    maven { url "https://jitpack.io" } 
-	maven { url "https://plugins.gradle.org/m2/" } 
-    maven { url 'https://repo.jenkins-ci.org/public/' }
-    maven { url 'https://repo.gradle.org/gradle/libs-releases' }
-    maven { url 'https://releases.usethesource.io/maven/' }
     maven { url "https://maven.pkg.jetbrains.space/kotlin/p/kotlin/kotlin-dependencies" }
     maven { url "https://packages.jetbrains.team/maven/p/ij/intellij-dependencies/" }
-    mavenLocal()
 }
-
 
 spotless {
     java {
-        target "**/*.java"		  
+        target "**/*.java"
         googleJavaFormat()
     }
-} 
+}
 
 apply plugin: RemapingPlugin
 
@@ -62,60 +50,64 @@ java {
     targetCompatibility = JavaVersion.VERSION_17
 }
 
-tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).all {
-    kotlinOptions {
-        jvmTarget = "17"
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+        allWarningsAsErrors.set(false)
     }
 }
+
 tasks.shadowJar.dependsOn tasks.remap
 tasks.assemble.dependsOn tasks.shadowJar
 tasks.build.dependsOn tasks.shadowJar
 
-shadowJar {  
+shadowJar {
+    // Keep the Android compiler artifact lean and avoid classes supplied by Sketchware/Android.
     exclude 'META-INF/maven/org.jetbrains/*/pom.xml'
     exclude 'META-INF/maven/org.jetbrains/*/pom.properties'
     exclude 'kotlin/**'
     exclude '**/*org/jetbrains/annotations/Nls*'
     exclude 'com/google/**'
-	exclude 'org/codehaus/**'
-
+    exclude 'org/codehaus/**'
 
     dependencies {
-        exclude(dependency("org.jetbrains:annotations:23.0.0"))
-        exclude(dependency("org.jetbrains.kotlin:kotlin-reflect:1.6.10"))
-        exclude(dependency("org.jetbrains.kotlin:kotlin-stdlib:2.1.21"))
-        exclude(dependency("org.jetbrains.kotlin:kotlin-stdlib-jdk8:2.1.21"))
-        exclude(dependency("org.jetbrains.kotlin:kotlin-stdlib-jdk7:2.1.21"))
-        exclude(dependency("org.jetbrains.kotlin:kotlin-stdlib-common:2.1.21"))
-        exclude(dependency("org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.8.0"))
-        exclude(dependency("org.jetbrains.kotlin:kotlin-script-runtime:2.1.21"))
-     }
-	
+        exclude(dependency("org.jetbrains:annotations:.*"))
+        exclude(dependency("org.jetbrains.kotlin:kotlin-reflect:.*"))
+        exclude(dependency("org.jetbrains.kotlin:kotlin-stdlib:.*"))
+        exclude(dependency("org.jetbrains.kotlin:kotlin-stdlib-jdk8:.*"))
+        exclude(dependency("org.jetbrains.kotlin:kotlin-stdlib-jdk7:.*"))
+        exclude(dependency("org.jetbrains.kotlin:kotlin-stdlib-common:.*"))
+        exclude(dependency("org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:.*"))
+        exclude(dependency("org.jetbrains.kotlin:kotlin-script-runtime:.*"))
+    }
+
     archiveFileName.set("kotlinc.jar")
     archiveClassifier.set("")
     archiveVersion.set("")
     destinationDirectory.set(file("$rootDir/build/libs"))
-	
+
+    // Reproducible output makes CI artifacts cache/diff friendly.
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
 }
 
 dependencies {
-    implementation("org.jetbrains.kotlin:kotlin-compiler:2.1.21")
+    implementation("org.jetbrains.kotlin:kotlin-compiler:${kotlinVersion}")
     implementation("org.jetbrains.intellij.deps:trove4j:1.0.20200330")
 }
 
 publishing {
     publications {
         shadow(MavenPublication) {
-            groupId = 'com.github.waelchateur'
+            groupId = 'com.github.shakinkhan943-source'
             artifactId = project.name
-            version = '2.1.21'
+            version = kotlinVersion
             artifact(tasks.shadowJar) {
                 builtBy tasks.shadowJar
             }
         }
     }
 }
-
 
 class RemapingPlugin implements Plugin<Project> {
     void apply(Project target) {
@@ -138,54 +130,80 @@ abstract class RemapingTask extends DefaultTask {
 
     RemapingTask() {
         inputJar.set(project.tasks.named("jar").flatMap { it.archiveFile })
-        outputJar.set(new File(project.buildDir, "libs/${project.name}.jar"))
+        outputJar.set(new File(project.layout.buildDirectory.get().asFile, "libs/${project.name}.jar"))
     }
 
     @TaskAction
     void remap() {
         File originalJar = inputJar.get().asFile
         File outputJarFile = outputJar.get().asFile
-        File tempJar = new File(project.buildDir, "tmp/libs/${project.name}.jar")
 
-        tempJar.parentFile.mkdirs()
         outputJarFile.parentFile.mkdirs()
+        File tempOutput = new File(outputJarFile.parentFile, outputJarFile.name + ".tmp")
+        tempOutput.delete()
 
-        tempJar.delete()
-        tempJar << originalJar.bytes
-
-        def remapper = new Remapper() {
+        Remapper remapper = new Remapper() {
             @Override
-            String map(String name) {                
-                if (name.startsWith("com/intellij")) return name.replaceFirst("^com/intellij", "org/jetbrains/kotlin/com/intellij")
+            String map(String name) {
+                if (name.startsWith("com/intellij")) {
+                    return name.replaceFirst("^com/intellij", "org/jetbrains/kotlin/com/intellij")
+                }
                 return name
             }
         }
 
+        // Read the already-built classes jar directly from disk with a streaming copy; never buffer the
+        // whole jar in memory (this jar is small but the project standardizes on streaming processing).
         try (
-            JarFile jar = new JarFile(tempJar)
-            ZipOutputStream out = new ZipOutputStream(new FileOutputStream(outputJarFile))
+            JarFile jar = new JarFile(originalJar)
+            ZipOutputStream out = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(tempOutput)))
         ) {
             Enumeration<JarEntry> entries = jar.entries()
+            byte[] copyBuffer = new byte[64 * 1024]
+
             while (entries.hasMoreElements()) {
                 JarEntry entry = entries.nextElement()
-                InputStream entryStream = jar.getInputStream(entry)
-
-                if (entry.getName().endsWith(".class")) {
-                    ClassReader reader = new ClassReader(entryStream)
-                    ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_FRAMES)
-                    ClassRemapper remapperVisitor = new ClassRemapper(writer, remapper)
-                    reader.accept(remapperVisitor, ClassReader.EXPAND_FRAMES)
-                    byte[] remappedBytes = writer.toByteArray()
-                    String newName = remapper.map(entry.getName())
-                    out.putNextEntry(new ZipEntry(newName))
-                    out.write(remappedBytes)
-                } else {
-                    out.putNextEntry(new ZipEntry(entry.getName()))
-                    out.write(entryStream.readAllBytes())
+                if (entry.isDirectory()) {
+                    continue
                 }
-                out.closeEntry()
-                entryStream.close()
+                try (InputStream entryStream = new BufferedInputStream(jar.getInputStream(entry))) {
+                    if (entry.getName().endsWith(".class")) {
+                        ClassReader reader = new ClassReader(entryStream)
+                        // Do NOT use COMPUTE_FRAMES: it forces ASM to resolve class hierarchies via
+                        // Class.forName, but the relocated org.jetbrains.kotlin.com.intellij.* types are
+                        // not on this build's classpath. ASM then falls back to java/lang/Object as the
+                        // common supertype, emitting stack-map frames that fail Android dex/verification.
+                        // Relocation never changes a class hierarchy, so the existing frames only need to
+                        // be *remapped* (ClassRemapper does that with EXPAND_FRAMES). Flag 0 keeps the
+                        // original (remapped) frames and avoids the expensive, failing hierarchy lookups.
+                        ClassWriter writer = new ClassWriter(0)
+                        ClassRemapper remapperVisitor = new ClassRemapper(writer, remapper)
+                        reader.accept(remapperVisitor, ClassReader.EXPAND_FRAMES)
+                        byte[] remappedBytes = writer.toByteArray()
+                        String newName = remapper.map(entry.getName())
+                        ZipEntry newEntry = new ZipEntry(newName)
+                        newEntry.time = 0L // deterministic timestamp for reproducible output
+                        out.putNextEntry(newEntry)
+                        out.write(remappedBytes)
+                    } else {
+                        ZipEntry newEntry = new ZipEntry(entry.getName())
+                        newEntry.time = 0L
+                        out.putNextEntry(newEntry)
+                        int read
+                        while ((read = entryStream.read(copyBuffer)) != -1) {
+                            out.write(copyBuffer, 0, read)
+                        }
+                    }
+                    out.closeEntry()
+                }
             }
+        }
+
+        if (outputJarFile.exists()) {
+            outputJarFile.delete()
+        }
+        if (!tempOutput.renameTo(outputJarFile)) {
+            throw new GradleException("Failed to move remapped jar into place: ${tempOutput} -> ${outputJarFile}")
         }
     }
 }
