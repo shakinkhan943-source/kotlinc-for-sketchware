@@ -120,7 +120,7 @@ private fun prepareCleanerCallback(): ((ByteBuffer) -> Unit)? {
 
             { buffer: ByteBuffer ->
                 cleaner.invoke(buffer)?.let { clean.invoke(it) }
-            } as ((ByteBuffer) -> Unit)
+            }
         } else if (IS_PRIOR_9_JRE) {
             val cleaner = Class.forName("java.nio.DirectByteBuffer").getMethod("cleaner")
             cleaner.isAccessible = true
@@ -128,7 +128,7 @@ private fun prepareCleanerCallback(): ((ByteBuffer) -> Unit)? {
             val clean = Class.forName("sun.misc.Cleaner").getMethod("clean")
             clean.isAccessible = true
 
-            { buffer: ByteBuffer -> cleaner.invoke(buffer)?.let { clean.invoke(it) } } as ((ByteBuffer) -> Unit)
+            { buffer: ByteBuffer -> cleaner.invoke(buffer)?.let { clean.invoke(it) } }
         } else {
             val unsafeClass =
                 try {
@@ -144,10 +144,9 @@ private fun prepareCleanerCallback(): ((ByteBuffer) -> Unit)? {
 
             val theUnsafeField = unsafeClass.getDeclaredField("theUnsafe")
             theUnsafeField.isAccessible = true
-
             val theUnsafe = theUnsafeField.get(null)
 
-            { buffer: ByteBuffer -> clean.invoke(theUnsafe, buffer) } as ((ByteBuffer) -> Unit)
+            { buffer: ByteBuffer -> clean.invoke(theUnsafe, buffer) }
         }
     } catch (ex: Exception) {
         null
