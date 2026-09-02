@@ -54,7 +54,8 @@ jobs:
           }
           EOF
 
-          ./gradlew -I /tmp/resolve-compiler-runtime.gradle :kotlinc:resolveCompilerRuntime
+          chmod +x gradlew
+         ./gradlew -I /tmp/resolve-compiler-runtime.gradle :kotlinc:resolveCompilerRuntime
           test -s compiler/runtime-classpath.txt
 
           echo "Resolved compiler runtime classpath:"
