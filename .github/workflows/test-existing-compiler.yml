@@ -6,17 +6,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
-      - name: Download compiler artifact from successful build
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -e
-          mkdir -p compiler
-          gh run download 33629574659 -R shakinkhan943-source/kotlinc-for-sketchware -n kotlinc-46142fa002173315e47cf6aa9b399802202b8ae1 -D compiler
-          test -s compiler/kotlinc.jar
-          ls -lh compiler/kotlinc.jar
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -24,24 +17,67 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Download Kotlin runtime required by compiler
+      - name: Download exact existing compiler artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -e
-          mkdir -p compiler/lib
-          curl -fsSL -o compiler/lib/kotlin-stdlib.jar \
-            https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/2.4.10/kotlin-stdlib-2.4.10.jar
-          test -s compiler/lib/kotlin-stdlib.jar
-          ls -lh compiler/lib/kotlin-stdlib.jar
+          set -euo pipefail
+          mkdir -p compiler
+          gh run download 33629574659 \
+            -R shakinkhan943-source/kotlinc-for-sketchware \
+            -n kotlinc-46142fa002173315e47cf6aa9b399802202b8ae1 \
+            -D compiler
+          test -s compiler/kotlinc.jar
+          ls -lh compiler/kotlinc.jar
+
+      - name: Resolve compiler runtime dependencies from Gradle
+        run: |
+          set -euo pipefail
+          cat > /tmp/resolve-compiler-runtime.gradle <<'EOF'
+          allprojects { project ->
+              if (project.path == ':kotlinc') {
+                  project.afterEvaluate {
+                      project.tasks.register('resolveCompilerRuntime') {
+                          doLast {
+                              def out = new File(project.rootDir, 'compiler/runtime-classpath.txt')
+                              out.parentFile.mkdirs()
+                              def files = project.configurations.runtimeClasspath.files
+                                  .findAll { it.name != 'kotlinc.jar' }
+                                  .sort { a, b -> a.name <=> b.name }
+                              out.text = files.collect { it.absolutePath }.join(System.lineSeparator()) + System.lineSeparator()
+                              println("Resolved ${files.size()} compiler runtime dependency JARs")
+                              files.each { println("  ${it.name}") }
+                          }
+                      }
+                  }
+              }
+          }
+          EOF
+
+          ./gradlew -I /tmp/resolve-compiler-runtime.gradle :kotlinc:resolveCompilerRuntime
+          test -s compiler/runtime-classpath.txt
+
+          echo "Resolved compiler runtime classpath:"
+          cat compiler/runtime-classpath.txt
+
+      - name: Build resolved compiler classpath
+        run: |
+          set -euo pipefail
+          RUNTIME_CP=$(paste -sd: compiler/runtime-classpath.txt)
+          echo "COMPILER_CP=compiler/kotlinc.jar:${RUNTIME_CP}" >> "$GITHUB_ENV"
+          echo "Compiler classpath assembled from Gradle runtimeClasspath."
 
       - name: Test compiler startup
         run: |
-          set -e
-          java -cp "compiler/kotlinc.jar:compiler/lib/kotlin-stdlib.jar" \
+          set -euo pipefail
+          java -cp "$COMPILER_CP" \
             org.jetbrains.kotlin.cli.jvm.K2JVMCompiler -version
 
       - name: Create Kotlin test suite
         run: |
+          set -euo pipefail
           mkdir -p tests/out
+
           cat > tests/Basic.kt <<'EOF'
           import java.math.BigInteger
 
@@ -60,30 +96,45 @@ jobs:
 
           fun testFeatures(): String {
               val users = listOf(User("Riad", 18), User("Test", 20))
-              val result = users.filter { it.age >= 18 }.map { it.name }.joinToString()
-              return result
+              return users.filter { it.age >= 18 }.map { it.name }.joinToString()
           }
           EOF
 
       - name: Compile Kotlin tests with existing compiler
         run: |
-          set -e
-          java -cp "compiler/kotlinc.jar:compiler/lib/kotlin-stdlib.jar" \
+          set -euo pipefail
+          RUNTIME_CP=$(paste -sd: compiler/runtime-classpath.txt)
+          java -cp "compiler/kotlinc.jar:${RUNTIME_CP}" \
             org.jetbrains.kotlin.cli.jvm.K2JVMCompiler \
             -d tests/out \
             tests/Basic.kt tests/Features.kt
+
           test -s tests/out/BasicKt.class
           test -s tests/out/FeaturesKt.class
           echo "KOTLIN_COMPILE_OK"
 
       - name: Run JVM output
         run: |
-          set -e
-          java -cp "tests/out:compiler/lib/kotlin-stdlib.jar:compiler/kotlinc.jar" BasicKt
+          set -euo pipefail
+          RUNTIME_CP=$(paste -sd: compiler/runtime-classpath.txt)
+          java -cp "tests/out:${RUNTIME_CP}" BasicKt
 
       - name: Verify generated bytecode
         run: |
-          set -e
+          set -euo pipefail
           javap -verbose tests/out/BasicKt.class >/dev/null
           javap -verbose tests/out/FeaturesKt.class >/dev/null
           echo "BYTECODE_OK"
+
+      - name: Final result
+        run: |
+          echo "=========================================="
+          echo " Existing Kotlin compiler test PASSED"
+          echo "=========================================="
+          echo "Existing kotlinc.jar: OK"
+          echo "Gradle runtime dependency resolution: OK"
+          echo "Compiler startup: OK"
+          echo "Kotlin compilation: OK"
+          echo "BigInteger test: OK"
+          echo "Bytecode generation: OK"
+          echo "=========================================="
