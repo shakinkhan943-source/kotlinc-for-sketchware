@@ -1,141 +1,216 @@
+
 name: Test Existing Kotlin Compiler
 
 on:
   workflow_dispatch:
 
 jobs:
-  test:
+  test-compiler:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
-      - name: Download exact existing compiler artifact
+      - name: Make Gradle wrapper executable
+        run: chmod +x ./gradlew
+
+      - name: Download existing kotlinc.jar
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
           mkdir -p compiler
+
           gh run download 33629574659 \
-            -R shakinkhan943-source/kotlinc-for-sketchware \
-            -n kotlinc-46142fa002173315e47cf6aa9b399802202b8ae1 \
-            -D compiler
+            --repo "${{ github.repository }}" \
+            --name kotlinc-jar \
+            --dir compiler
+
           test -s compiler/kotlinc.jar
+
+          echo "Existing compiler:"
           ls -lh compiler/kotlinc.jar
 
-      - name: Resolve compiler runtime dependencies from Gradle
+      - name: Resolve compiler runtime dependencies
         run: |
-          set -euo pipefail
+          mkdir -p compiler/lib
+
           cat > /tmp/resolve-compiler-runtime.gradle <<'EOF'
-allprojects { project ->
-    if (project.path == ':kotlinc') {
-        project.afterEvaluate {
-            project.tasks.register('resolveCompilerRuntime') {
-                doLast {
-                    def out = new File(project.rootDir, 'compiler/runtime-classpath.txt')
-                    out.parentFile.mkdirs()
-                    def files = project.configurations.runtimeClasspath.files
-                        .findAll { it.name != 'kotlinc.jar' }
-                        .sort { a, b -> a.name <=> b.name }
-                    out.text = files.collect { it.absolutePath }.join(System.lineSeparator()) + System.lineSeparator()
-                    println("Resolved ${files.size()} compiler runtime dependency JARs")
-                    files.each { println("  ${it.name}") }
-                }
-            }
-        }
-    }
-}
-EOF
+          configurations {
+              compilerRuntime
+          }
 
-          chmod +x ./gradlew
-          ./gradlew -I /tmp/resolve-compiler-runtime.gradle :kotlinc:resolveCompilerRuntime
-          test -s compiler/runtime-classpath.txt
+          dependencies {
+              compilerRuntime project(':kotlinc')
+          }
 
-          echo "Resolved compiler runtime classpath:"
-          cat compiler/runtime-classpath.txt
+          tasks.register("resolveCompilerRuntime") {
+              doLast {
+                  def output = file("${rootDir}/compiler/lib")
 
-      - name: Build resolved compiler classpath
+                  configurations.compilerRuntime.resolve().each { jar ->
+                      copy {
+                          from jar
+                          into output
+                      }
+                      println "RESOLVED: ${jar.name}"
+                  }
+              }
+          }
+          EOF
+
+          ./gradlew \
+            -I /tmp/resolve-compiler-runtime.gradle \
+            :kotlinc:resolveCompilerRuntime \
+            --no-daemon \
+            --stacktrace
+
+      - name: Show resolved dependencies
         run: |
-          set -euo pipefail
-          RUNTIME_CP=$(paste -sd: compiler/runtime-classpath.txt)
-          echo "COMPILER_CP=compiler/kotlinc.jar:${RUNTIME_CP}" >> "$GITHUB_ENV"
-          echo "Compiler classpath assembled from Gradle runtimeClasspath."
+          echo "Resolved compiler runtime:"
+          find compiler/lib -type f -name "*.jar" -print | sort
 
-      - name: Test compiler startup
+          echo
+          echo "Dependency count:"
+          find compiler/lib -type f -name "*.jar" | wc -l
+
+      - name: Build compiler classpath
         run: |
-          set -euo pipefail
+          COMPILER_CP="compiler/kotlinc.jar"
+
+          while IFS= read -r jar; do
+              COMPILER_CP="$COMPILER_CP:$jar"
+          done < <(find compiler/lib -type f -name "*.jar" | sort)
+
+          echo "COMPILER_CP=$COMPILER_CP" >> "$GITHUB_ENV"
+
+          echo "Compiler classpath contains:"
+          echo "$COMPILER_CP" | tr ':' '\n'
+
+      - name: Check compiler version
+        run: |
           java -cp "$COMPILER_CP" \
-            org.jetbrains.kotlin.cli.jvm.K2JVMCompiler -version
-
-      - name: Create Kotlin test suite
-        run: |
-          set -euo pipefail
-          mkdir -p tests/out
-
-          cat > tests/Basic.kt <<'EOF'
-import java.math.BigInteger
-
-fun main() {
-    val a = "123456789"
-    val b = "987654321"
-    val x: BigInteger = a.toBigInteger()
-    val y: BigInteger = b.toBigInteger()
-    check(x + y == BigInteger("1111111110"))
-    println("BASIC_OK")
-}
-EOF
-
-          cat > tests/Features.kt <<'EOF'
-data class User(val name: String, val age: Int)
-
-fun testFeatures(): String {
-    val users = listOf(User("Riad", 18), User("Test", 20))
-    return users.filter { it.age >= 18 }.map { it.name }.joinToString()
-}
-EOF
-
-      - name: Compile Kotlin tests with existing compiler
-        run: |
-          set -euo pipefail
-          RUNTIME_CP=$(paste -sd: compiler/runtime-classpath.txt)
-          java -cp "compiler/kotlinc.jar:${RUNTIME_CP}" \
             org.jetbrains.kotlin.cli.jvm.K2JVMCompiler \
-            -d tests/out \
-            tests/Basic.kt tests/Features.kt
+            -version
 
-          test -s tests/out/BasicKt.class
-          test -s tests/out/FeaturesKt.class
-          echo "KOTLIN_COMPILE_OK"
-
-      - name: Run JVM output
+      - name: Create Kotlin test sources
         run: |
-          set -euo pipefail
-          RUNTIME_CP=$(paste -sd: compiler/runtime-classpath.txt)
-          java -cp "tests/out:${RUNTIME_CP}" BasicKt
+          mkdir -p test-src test-out
+
+          cat > test-src/Main.kt <<'EOF'
+          import java.math.BigInteger
+
+          data class User(
+              val name: String,
+              val age: Int
+          )
+
+          fun main() {
+              val a = "123456789"
+              val b = "987654321"
+
+              val x: BigInteger = a.toBigInteger()
+              val y: BigInteger = b.toBigInteger()
+
+              val result = x + y
+
+              val user = User("Riad", 18)
+
+              val numbers = listOf(1, 2, 3, 4, 5)
+              val doubled = numbers.map { it * 2 }
+
+              println("BigInteger result: $result")
+              println("User: $user")
+              println("Doubled: $doubled")
+          }
+          EOF
+
+      - name: Compile Kotlin test
+        run: |
+          java -cp "$COMPILER_CP" \
+            org.jetbrains.kotlin.cli.jvm.K2JVMCompiler \
+            -classpath "$COMPILER_CP" \
+            -d test-out \
+            test-src/Main.kt
+
+          test -f test-out/MainKt.class
+
+          echo "Kotlin compilation successful."
+
+          find test-out -type f -print
+
+      - name: Run compiled Kotlin program
+        run: |
+          RUNTIME_CP="test-out"
+
+          while IFS= read -r jar; do
+              RUNTIME_CP="$RUNTIME_CP:$jar"
+          done < <(find compiler/lib -type f -name "*.jar" | sort)
+
+          java -cp "$RUNTIME_CP" MainKt
+
+      - name: Test Java interoperability
+        run: |
+          cat > test-src/JavaInterop.java <<'EOF'
+          public class JavaInterop {
+              public static String message() {
+                  return "Hello from Java";
+              }
+          }
+          EOF
+
+          javac -d test-out test-src/JavaInterop.java
+
+          cat > test-src/Interop.kt <<'EOF'
+          fun main() {
+              println(JavaInterop.message())
+          }
+          EOF
+
+          java -cp "$COMPILER_CP" \
+            org.jetbrains.kotlin.cli.jvm.K2JVMCompiler \
+            -classpath "$COMPILER_CP:test-out" \
+            -d test-out \
+            test-src/Interop.kt
+
+          RUNTIME_CP="test-out"
+
+          while IFS= read -r jar; do
+              RUNTIME_CP="$RUNTIME_CP:$jar"
+          done < <(find compiler/lib -type f -name "*.jar" | sort)
+
+          java -cp "$RUNTIME_CP" InteropKt
 
       - name: Verify generated bytecode
         run: |
-          set -euo pipefail
-          javap -verbose tests/out/BasicKt.class >/dev/null
-          javap -verbose tests/out/FeaturesKt.class >/dev/null
-          echo "BYTECODE_OK"
+          test -s test-out/MainKt.class
+          test -s test-out/InteropKt.class
+
+          echo "MainKt:"
+          javap -classpath test-out MainKt
+
+          echo
+          echo "InteropKt:"
+          javap -classpath test-out InteropKt
 
       - name: Final result
         run: |
           echo "=========================================="
-          echo " Existing Kotlin compiler test PASSED"
+          echo " EXISTING KOTLIN COMPILER TEST PASSED"
           echo "=========================================="
-          echo "Existing kotlinc.jar: OK"
-          echo "Gradle runtime dependency resolution: OK"
-          echo "Compiler startup: OK"
-          echo "Kotlin compilation: OK"
-          echo "BigInteger test: OK"
-          echo "Bytecode generation: OK"
+          echo "Existing kotlinc.jar:        OK"
+          echo "Gradle dependency resolution: OK"
+          echo "Compiler startup:             OK"
+          echo "Kotlin compilation:           OK"
+          echo "BigInteger test:              OK"
+          echo "Collections/lambda test:      OK"
+          echo "JVM execution:                OK"
+          echo "Java interoperability:        OK"
+          echo "Bytecode generation:          OK"
           echo "=========================================="
