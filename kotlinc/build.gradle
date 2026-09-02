@@ -1,4 +1,5 @@
 import org.gradle.api.tasks.*
+import org.gradle.api.GradleException
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.objectweb.asm.*
 import org.objectweb.asm.commons.*
@@ -136,15 +137,12 @@ abstract class RemapingTask extends DefaultTask {
     void remap() {
         File originalJar = inputJar.get().asFile
         File outputJarFile = outputJar.get().asFile
-        File tempJar = new File(project.layout.buildDirectory.get().asFile, "tmp/libs/${project.name}.jar")
 
-        tempJar.parentFile.mkdirs()
         outputJarFile.parentFile.mkdirs()
+        File tempOutput = new File(outputJarFile.parentFile, outputJarFile.name + ".tmp")
+        tempOutput.delete()
 
-        tempJar.delete()
-        tempJar << originalJar.bytes
-
-        def remapper = new Remapper() {
+        Remapper remapper = new Remapper() {
             @Override
             String map(String name) {
                 if (name.startsWith("com/intellij")) {
@@ -154,27 +152,43 @@ abstract class RemapingTask extends DefaultTask {
             }
         }
 
+        // Read the already-built classes jar directly from disk with a streaming copy; never buffer the
+        // whole jar in memory (this jar is small but the project standardizes on streaming processing).
         try (
-            JarFile jar = new JarFile(tempJar)
-            ZipOutputStream out = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(outputJarFile)))
+            JarFile jar = new JarFile(originalJar)
+            ZipOutputStream out = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(tempOutput)))
         ) {
             Enumeration<JarEntry> entries = jar.entries()
             byte[] copyBuffer = new byte[64 * 1024]
 
             while (entries.hasMoreElements()) {
                 JarEntry entry = entries.nextElement()
+                if (entry.isDirectory()) {
+                    continue
+                }
                 try (InputStream entryStream = new BufferedInputStream(jar.getInputStream(entry))) {
                     if (entry.getName().endsWith(".class")) {
                         ClassReader reader = new ClassReader(entryStream)
-                        ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_FRAMES)
+                        // Do NOT use COMPUTE_FRAMES: it forces ASM to resolve class hierarchies via
+                        // Class.forName, but the relocated org.jetbrains.kotlin.com.intellij.* types are
+                        // not on this build's classpath. ASM then falls back to java/lang/Object as the
+                        // common supertype, emitting stack-map frames that fail Android dex/verification.
+                        // Relocation never changes a class hierarchy, so the existing frames only need to
+                        // be *remapped* (ClassRemapper does that with EXPAND_FRAMES). Flag 0 keeps the
+                        // original (remapped) frames and avoids the expensive, failing hierarchy lookups.
+                        ClassWriter writer = new ClassWriter(0)
                         ClassRemapper remapperVisitor = new ClassRemapper(writer, remapper)
                         reader.accept(remapperVisitor, ClassReader.EXPAND_FRAMES)
                         byte[] remappedBytes = writer.toByteArray()
                         String newName = remapper.map(entry.getName())
-                        out.putNextEntry(new ZipEntry(newName))
+                        ZipEntry newEntry = new ZipEntry(newName)
+                        newEntry.time = 0L // deterministic timestamp for reproducible output
+                        out.putNextEntry(newEntry)
                         out.write(remappedBytes)
                     } else {
-                        out.putNextEntry(new ZipEntry(entry.getName()))
+                        ZipEntry newEntry = new ZipEntry(entry.getName())
+                        newEntry.time = 0L
+                        out.putNextEntry(newEntry)
                         int read
                         while ((read = entryStream.read(copyBuffer)) != -1) {
                             out.write(copyBuffer, 0, read)
@@ -183,6 +197,13 @@ abstract class RemapingTask extends DefaultTask {
                     out.closeEntry()
                 }
             }
+        }
+
+        if (outputJarFile.exists()) {
+            outputJarFile.delete()
+        }
+        if (!tempOutput.renameTo(outputJarFile)) {
+            throw new GradleException("Failed to move remapped jar into place: ${tempOutput} -> ${outputJarFile}")
         }
     }
 }
