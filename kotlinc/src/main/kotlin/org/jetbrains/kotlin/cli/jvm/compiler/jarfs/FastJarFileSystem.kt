@@ -25,10 +25,6 @@ class FastJarFileSystem private constructor(internal val unmapBuffer: MappedByte
     private val myHandlers: MutableMap<String, FastJarHandler> =
         ConcurrentFactoryMap.createMap { key: String -> FastJarHandler(this@FastJarFileSystem, key) }
 
-    // On low-end Android devices file descriptors and address space are a scarce resource. Keep the
-    // open-jar handle cache small so mapping many classpath jars does not exhaust the per-process fd/mmap
-    // limits (upstream desktop uses 20/10; the Android compiler typically processes the SDK + a handful
-    // of libraries, so a smaller cache is sufficient and cheaper).
     internal val cachedOpenFileHandles: FileAccessorCache<File, RandomAccessFileAndBuffer> =
         object : FileAccessorCache<File, RandomAccessFileAndBuffer>(ANDROID_OPEN_FILE_CACHE_LIMIT, ANDROID_OPEN_FILE_CACHE_EVICT) {
             @Throws(IOException::class)
@@ -49,14 +45,10 @@ class FastJarFileSystem private constructor(internal val unmapBuffer: MappedByte
                 fileAccessor.second.unmap()
             }
 
-            override fun isEqual(val1: File, val2: File): Boolean {
-                return val1 == val2 // reference equality to handle different jars for different ZipHandlers on the same path
-            }
+            override fun isEqual(val1: File, val2: File): Boolean = val1 == val2
         }
 
-    override fun getProtocol(): String {
-        return StandardFileSystems.JAR_PROTOCOL
-    }
+    override fun getProtocol(): String = StandardFileSystems.JAR_PROTOCOL
 
     override fun findFileByPath(path: String): VirtualFile? {
         val pair = splitPath(path)
@@ -65,9 +57,7 @@ class FastJarFileSystem private constructor(internal val unmapBuffer: MappedByte
 
     override fun refresh(asynchronous: Boolean) {}
 
-    override fun refreshAndFindFileByPath(path: String): VirtualFile? {
-        return findFileByPath(path)
-    }
+    override fun refreshAndFindFileByPath(path: String): VirtualFile? = findFileByPath(path)
 
     fun clearHandlersCache() {
         myHandlers.clear()
@@ -79,8 +69,6 @@ class FastJarFileSystem private constructor(internal val unmapBuffer: MappedByte
     }
 
     companion object {
-        // FileAccessorCache(strong/keepalive limit, weak/eviction margin). Smaller values bound fd and
-        // mmap usage on constrained Android runtimes without affecting desktop behaviour meaningfully.
         private const val ANDROID_OPEN_FILE_CACHE_LIMIT = 8
         private const val ANDROID_OPEN_FILE_CACHE_EVICT = 4
 
@@ -99,56 +87,49 @@ class FastJarFileSystem private constructor(internal val unmapBuffer: MappedByte
     }
 }
 
-
 private val IS_PRIOR_9_JRE = System.getProperty("java.specification.version", "").startsWith("1.")
 
 private fun prepareCleanerCallback(): ((ByteBuffer) -> Unit)? {
     return try {
         if (isDalvik()) {
-            // On Android/Dalvik the mapped buffer is unmapped through libcore's DirectByteBuffer.cleaner()
-            // (a sun.misc.Cleaner), exactly like the pre-Java-9 desktop path. Older Android releases do not
-            // expose the method, in which case we return null and the caller falls back to the regular jar FS.
             val directByteBuffer = Class.forName("java.nio.DirectByteBuffer")
-            if (directByteBuffer.declaredMethods.none { it.name == "cleaner" }) {
-                return null
-            }
+            if (directByteBuffer.declaredMethods.none { it.name == "cleaner" }) return null
             val cleaner = directByteBuffer.getMethod("cleaner")
             cleaner.isAccessible = true
-
             val clean = Class.forName("sun.misc.Cleaner").getMethod("clean")
             clean.isAccessible = true
-
-            { buffer: ByteBuffer ->
-                cleaner.invoke(buffer)?.let { clean.invoke(it) }
+            val callback: (ByteBuffer) -> Unit = { buffer ->
+                val cleanerObject = cleaner.invoke(buffer)
+                if (cleanerObject != null) clean.invoke(cleanerObject)
             }
+            callback
         } else if (IS_PRIOR_9_JRE) {
             val cleaner = Class.forName("java.nio.DirectByteBuffer").getMethod("cleaner")
             cleaner.isAccessible = true
-
             val clean = Class.forName("sun.misc.Cleaner").getMethod("clean")
             clean.isAccessible = true
-
-            { buffer: ByteBuffer -> cleaner.invoke(buffer)?.let { clean.invoke(it) } }
+            val callback: (ByteBuffer) -> Unit = { buffer ->
+                val cleanerObject = cleaner.invoke(buffer)
+                if (cleanerObject != null) clean.invoke(cleanerObject)
+            }
+            callback
         } else {
-            val unsafeClass =
-                try {
-                    Class.forName("sun.misc.Unsafe")
-                } catch (ex: Exception) {
-                    // jdk.internal.misc.Unsafe doesn't yet have an invokeCleaner() method,
-                    // but that method should be added if sun.misc.Unsafe is removed.
-                    Class.forName("jdk.internal.misc.Unsafe")
-                }
-
+            val unsafeClass = try {
+                Class.forName("sun.misc.Unsafe")
+            } catch (_: Exception) {
+                Class.forName("jdk.internal.misc.Unsafe")
+            }
             val clean = unsafeClass.getMethod("invokeCleaner", ByteBuffer::class.java)
             clean.isAccessible = true
-
             val theUnsafeField = unsafeClass.getDeclaredField("theUnsafe")
             theUnsafeField.isAccessible = true
             val theUnsafe = theUnsafeField.get(null)
-
-            { buffer: ByteBuffer -> clean.invoke(theUnsafe, buffer) }
+            val callback: (ByteBuffer) -> Unit = { buffer ->
+                clean.invoke(theUnsafe, buffer)
+            }
+            callback
         }
-    } catch (ex: Exception) {
+    } catch (_: Exception) {
         null
     }
 }
