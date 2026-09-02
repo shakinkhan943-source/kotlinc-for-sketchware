@@ -10,6 +10,7 @@ import com.intellij.openapi.vfs.VirtualFile
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.RandomAccessFile
+import java.nio.ByteOrder
 import java.nio.channels.FileChannel
 import kotlin.collections.HashMap
 
@@ -22,11 +23,17 @@ class FastJarHandler(val fileSystem: FastJarFileSystem, path: String) {
     init {
         val entries: List<ZipEntryDescription>
         RandomAccessFile(file, "r").use { randomAccessFile ->
-            val mappedByteBuffer = randomAccessFile.channel.map(FileChannel.MapMode.READ_ONLY, 0, randomAccessFile.length())
+            val largeBuffer =
+                LargeDynamicMappedBuffer(
+                    randomAccessFile.length(),
+                    { offset, size -> randomAccessFile.channel.map(FileChannel.MapMode.READ_ONLY, offset, size) },
+                    fileSystem.unmapBuffer,
+                    defaultByteOrder = ByteOrder.LITTLE_ENDIAN,
+                )
             try {
                 entries =
                     try {
-                        mappedByteBuffer.parseCentralDirectory()
+                        largeBuffer.parseCentralDirectory()
                     } catch (e: Exception) {
                         // copying the behavior of ArchiveHandler (and therefore ZipHandler)
                         // TODO: consider propagating to compiler error or warning, but take into account that both javac and K1 simply ignore invalid jars in such cases
@@ -35,15 +42,16 @@ class FastJarHandler(val fileSystem: FastJarFileSystem, path: String) {
                     }
                 cachedManifest =
                     entries.singleOrNull { StringUtil.equals(MANIFEST_PATH, it.relativePath) }
-                        ?.let(mappedByteBuffer::contentsToByteArray)
+                        ?.let(largeBuffer::contentsToByteArray)
             } finally {
-                with(fileSystem) {
-                    mappedByteBuffer.unmapBuffer()
-                }
+                // The central-directory scan buffer is only needed during initialization; release the
+                // mapping immediately so jars on the classpath do not keep large regions resident on
+                // memory-constrained Android runtimes.
+                largeBuffer.unmap()
             }
         }
 
-        myRoot = FastJarVirtualFile(this, "", -1, parent = null, entryDescription = null)
+        myRoot = FastJarVirtualFile(this, "", -1L, parent = null, entryDescription = null)
 
         // ByteArrayCharSequence should not be used instead of String
         // because the former class does not support equals/hashCode properly
@@ -91,7 +99,7 @@ class FastJarHandler(val fileSystem: FastJarFileSystem, path: String) {
             val (parentPath, shortName) = entryName.splitPath()
             val parentFile = getOrCreateDirectory(parentPath, directories)
 
-            FastJarVirtualFile(this, shortName, -1, parentFile, entryDescription = null)
+            FastJarVirtualFile(this, shortName, -1L, parentFile, entryDescription = null)
         }
     }
 
