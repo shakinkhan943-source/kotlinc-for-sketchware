@@ -21,6 +21,10 @@ jobs:
       - name: Make Gradle wrapper executable
         run: chmod +x ./gradlew
 
+      # ------------------------------------------------------------
+      # Download the EXACT compiler JAR from the known-good build.
+      # This workflow does NOT rebuild the compiler.
+      # ------------------------------------------------------------
       - name: Download existing kotlinc.jar
         env:
           GH_TOKEN: ${{ github.token }}
@@ -33,54 +37,96 @@ jobs:
             --name kotlinc-46142fa002173315e47cf6aa9b399802202b8ae1 \
             --dir compiler
 
-          echo "Downloaded artifact contents:"
+          echo "Artifact contents:"
           find compiler -maxdepth 2 -type f -print
 
           test -s compiler/kotlinc.jar
 
           echo
-          echo "Existing compiler:"
+          echo "Existing compiler JAR:"
           ls -lh compiler/kotlinc.jar
 
-      - name: Resolve compiler runtime dependencies
+      # ------------------------------------------------------------
+      # Resolve dependencies using a REAL temporary Gradle project.
+      #
+      # This avoids the previous -I init-script problem.
+      #
+      # The dependency declarations mirror the current :kotlinc
+      # module:
+      #
+      #   org.jetbrains.kotlin:kotlin-compiler:2.4.10
+      #   org.jetbrains.intellij.deps:trove4j:1.0.20200330
+      #
+      # Gradle resolves ALL transitive dependencies automatically.
+      # ------------------------------------------------------------
+      - name: Resolve compiler dependencies automatically
         run: |
+          rm -rf dependency-resolver
+          mkdir -p dependency-resolver
           mkdir -p compiler/lib
 
-          cat > /tmp/resolve-compiler-runtime.gradle <<'EOF'
+          cat > dependency-resolver/settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  mavenCentral()
+                  gradlePluginPortal()
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  mavenCentral()
+          }
+
+          rootProject.name = "compiler-dependency-resolver"
+          EOF
+
+          cat > dependency-resolver/build.gradle <<'EOF'
+          plugins {
+              id 'base'
+          }
+
+          repositories {
+              mavenCentral()
+          }
+
           configurations {
               compilerRuntime
           }
 
           dependencies {
-              compilerRuntime project(':kotlinc')
+              compilerRuntime 'org.jetbrains.kotlin:kotlin-compiler:2.4.10'
+              compilerRuntime 'org.jetbrains.intellij.deps:trove4j:1.0.20200330'
           }
 
-          tasks.register("resolveCompilerRuntime") {
+          tasks.register('resolveCompilerRuntime') {
               doLast {
-                  def output = file("${rootDir}/compiler/lib")
+                  def outputDir = file("${rootProject.projectDir}/../compiler/lib")
+                  outputDir.mkdirs()
 
-                  configurations.compilerRuntime.resolve().each { jar ->
+                  configurations.compilerRuntime.resolve().each { file ->
                       copy {
-                          from jar
-                          into output
+                          from file
+                          into outputDir
                       }
 
-                      println "RESOLVED: ${jar.name}"
+                      println "RESOLVED: ${file.name}"
                   }
               }
           }
           EOF
 
-          ./gradlew \
-            -I /tmp/resolve-compiler-runtime.gradle \
-            :kotlinc:resolveCompilerRuntime \
+          cd dependency-resolver
+
+          ../gradlew \
+            resolveCompilerRuntime \
             --no-daemon \
             --stacktrace
 
-      - name: Show resolved dependencies
+      - name: Show automatically resolved dependencies
         run: |
           echo "=========================================="
-          echo "Resolved compiler dependencies"
+          echo "Automatically resolved compiler dependencies"
           echo "=========================================="
 
           find compiler/lib \
@@ -94,17 +140,21 @@ jobs:
             -type f \
             -name "*.jar" | wc -l
 
+      # ------------------------------------------------------------
+      # Build the runtime classpath from EVERYTHING Gradle resolved.
+      # No individual dependency is guessed or hardcoded here.
+      # ------------------------------------------------------------
       - name: Build compiler classpath
         run: |
           COMPILER_CP="compiler/kotlinc.jar"
 
           while IFS= read -r jar; do
-            COMPILER_CP="$COMPILER_CP:$jar"
+              COMPILER_CP="$COMPILER_CP:$jar"
           done < <(
-            find compiler/lib \
-              -type f \
-              -name "*.jar" \
-              | sort
+              find compiler/lib \
+                -type f \
+                -name "*.jar" \
+                | sort
           )
 
           echo "COMPILER_CP=$COMPILER_CP" >> "$GITHUB_ENV"
@@ -115,6 +165,9 @@ jobs:
 
           echo "$COMPILER_CP" | tr ':' '\n'
 
+      # ------------------------------------------------------------
+      # Verify the EXISTING JAR can actually start.
+      # ------------------------------------------------------------
       - name: Check compiler version
         run: |
           echo "Starting existing Kotlin compiler..."
@@ -123,6 +176,9 @@ jobs:
             org.jetbrains.kotlin.cli.jvm.K2JVMCompiler \
             -version
 
+      # ------------------------------------------------------------
+      # Real Kotlin compilation test.
+      # ------------------------------------------------------------
       - name: Create Kotlin test source
         run: |
           mkdir -p test-src test-out
@@ -166,32 +222,38 @@ jobs:
             -d test-out \
             test-src/Main.kt
 
-          test -f test-out/MainKt.class
+          test -s test-out/MainKt.class
 
           echo
           echo "Kotlin compilation successful."
 
           echo
-          echo "Generated files:"
+          echo "Generated class files:"
           find test-out -type f -print
 
+      # ------------------------------------------------------------
+      # Execute the generated JVM bytecode.
+      # ------------------------------------------------------------
       - name: Run compiled Kotlin program
         run: |
           RUNTIME_CP="test-out"
 
           while IFS= read -r jar; do
-            RUNTIME_CP="$RUNTIME_CP:$jar"
+              RUNTIME_CP="$RUNTIME_CP:$jar"
           done < <(
-            find compiler/lib \
-              -type f \
-              -name "*.jar" \
-              | sort
+              find compiler/lib \
+                -type f \
+                -name "*.jar" \
+                | sort
           )
 
-          echo "Running compiled program..."
+          echo "Running compiled Kotlin program..."
 
           java -cp "$RUNTIME_CP" MainKt
 
+      # ------------------------------------------------------------
+      # Java interoperability test.
+      # ------------------------------------------------------------
       - name: Test Java interoperability
         run: |
           cat > test-src/JavaInterop.java <<'EOF'
@@ -218,21 +280,24 @@ jobs:
             -d test-out \
             test-src/Interop.kt
 
-          test -f test-out/InteropKt.class
+          test -s test-out/InteropKt.class
 
           RUNTIME_CP="test-out"
 
           while IFS= read -r jar; do
-            RUNTIME_CP="$RUNTIME_CP:$jar"
+              RUNTIME_CP="$RUNTIME_CP:$jar"
           done < <(
-            find compiler/lib \
-              -type f \
-              -name "*.jar" \
-              | sort
+              find compiler/lib \
+                -type f \
+                -name "*.jar" \
+                | sort
           )
 
           java -cp "$RUNTIME_CP" InteropKt
 
+      # ------------------------------------------------------------
+      # Verify generated JVM bytecode.
+      # ------------------------------------------------------------
       - name: Verify generated bytecode
         run: |
           test -s test-out/MainKt.class
@@ -255,6 +320,9 @@ jobs:
             -classpath test-out \
             InteropKt
 
+      # ------------------------------------------------------------
+      # Final result.
+      # ------------------------------------------------------------
       - name: Final result
         run: |
           echo
@@ -264,7 +332,7 @@ jobs:
           echo
           echo "Existing kotlinc.jar:          OK"
           echo "Artifact download:             OK"
-          echo "Gradle dependency resolution:  OK"
+          echo "Automatic dependency resolve:  OK"
           echo "Compiler startup:              OK"
           echo "Kotlin compilation:            OK"
           echo "BigInteger test:               OK"
@@ -273,6 +341,6 @@ jobs:
           echo "Java interoperability:         OK"
           echo "Bytecode generation:            OK"
           echo
-          echo "The existing compiler JAR is"
-          echo "ready for the next integration test."
+          echo "The existing compiler JAR passed"
+          echo "the JVM compiler verification."
           echo "=========================================="
