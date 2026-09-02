@@ -1,1 +1,1 @@
-android kotlinc v2.1.21 for sketchware
+android kotlinc v2.4.10 for sketchware
