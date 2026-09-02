@@ -34,28 +34,28 @@ jobs:
         run: |
           set -euo pipefail
           cat > /tmp/resolve-compiler-runtime.gradle <<'EOF'
-          allprojects { project ->
-              if (project.path == ':kotlinc') {
-                  project.afterEvaluate {
-                      project.tasks.register('resolveCompilerRuntime') {
-                          doLast {
-                              def out = new File(project.rootDir, 'compiler/runtime-classpath.txt')
-                              out.parentFile.mkdirs()
-                              def files = project.configurations.runtimeClasspath.files
-                                  .findAll { it.name != 'kotlinc.jar' }
-                                  .sort { a, b -> a.name <=> b.name }
-                              out.text = files.collect { it.absolutePath }.join(System.lineSeparator()) + System.lineSeparator()
-                              println("Resolved ${files.size()} compiler runtime dependency JARs")
-                              files.each { println("  ${it.name}") }
-                          }
-                      }
-                  }
-              }
-          }
-          EOF
+allprojects { project ->
+    if (project.path == ':kotlinc') {
+        project.afterEvaluate {
+            project.tasks.register('resolveCompilerRuntime') {
+                doLast {
+                    def out = new File(project.rootDir, 'compiler/runtime-classpath.txt')
+                    out.parentFile.mkdirs()
+                    def files = project.configurations.runtimeClasspath.files
+                        .findAll { it.name != 'kotlinc.jar' }
+                        .sort { a, b -> a.name <=> b.name }
+                    out.text = files.collect { it.absolutePath }.join(System.lineSeparator()) + System.lineSeparator()
+                    println("Resolved ${files.size()} compiler runtime dependency JARs")
+                    files.each { println("  ${it.name}") }
+                }
+            }
+        }
+    }
+}
+EOF
 
-          chmod +x gradlew
-         ./gradlew -I /tmp/resolve-compiler-runtime.gradle :kotlinc:resolveCompilerRuntime
+          chmod +x ./gradlew
+          ./gradlew -I /tmp/resolve-compiler-runtime.gradle :kotlinc:resolveCompilerRuntime
           test -s compiler/runtime-classpath.txt
 
           echo "Resolved compiler runtime classpath:"
@@ -80,26 +80,26 @@ jobs:
           mkdir -p tests/out
 
           cat > tests/Basic.kt <<'EOF'
-          import java.math.BigInteger
+import java.math.BigInteger
 
-          fun main() {
-              val a = "123456789"
-              val b = "987654321"
-              val x: BigInteger = a.toBigInteger()
-              val y: BigInteger = b.toBigInteger()
-              check(x + y == BigInteger("1111111110"))
-              println("BASIC_OK")
-          }
-          EOF
+fun main() {
+    val a = "123456789"
+    val b = "987654321"
+    val x: BigInteger = a.toBigInteger()
+    val y: BigInteger = b.toBigInteger()
+    check(x + y == BigInteger("1111111110"))
+    println("BASIC_OK")
+}
+EOF
 
           cat > tests/Features.kt <<'EOF'
-          data class User(val name: String, val age: Int)
+data class User(val name: String, val age: Int)
 
-          fun testFeatures(): String {
-              val users = listOf(User("Riad", 18), User("Test", 20))
-              return users.filter { it.age >= 18 }.map { it.name }.joinToString()
-          }
-          EOF
+fun testFeatures(): String {
+    val users = listOf(User("Riad", 18), User("Test", 20))
+    return users.filter { it.age >= 18 }.map { it.name }.joinToString()
+}
+EOF
 
       - name: Compile Kotlin tests with existing compiler
         run: |
