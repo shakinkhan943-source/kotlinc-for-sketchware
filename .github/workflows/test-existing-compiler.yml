@@ -25,15 +25,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          rm -rf compiler
           mkdir -p compiler
 
           gh run download 33629574659 \
             --repo "${{ github.repository }}" \
-            --name kotlinc-jar \
+            --name kotlinc-46142fa002173315e47cf6aa9b399802202b8ae1 \
             --dir compiler
+
+          echo "Downloaded artifact contents:"
+          find compiler -maxdepth 2 -type f -print
 
           test -s compiler/kotlinc.jar
 
+          echo
           echo "Existing compiler:"
           ls -lh compiler/kotlinc.jar
 
@@ -59,6 +64,7 @@ jobs:
                           from jar
                           into output
                       }
+
                       println "RESOLVED: ${jar.name}"
                   }
               }
@@ -73,33 +79,51 @@ jobs:
 
       - name: Show resolved dependencies
         run: |
-          echo "Resolved compiler runtime:"
-          find compiler/lib -type f -name "*.jar" -print | sort
+          echo "=========================================="
+          echo "Resolved compiler dependencies"
+          echo "=========================================="
+
+          find compiler/lib \
+            -type f \
+            -name "*.jar" \
+            -print | sort
 
           echo
           echo "Dependency count:"
-          find compiler/lib -type f -name "*.jar" | wc -l
+          find compiler/lib \
+            -type f \
+            -name "*.jar" | wc -l
 
       - name: Build compiler classpath
         run: |
           COMPILER_CP="compiler/kotlinc.jar"
 
           while IFS= read -r jar; do
-              COMPILER_CP="$COMPILER_CP:$jar"
-          done < <(find compiler/lib -type f -name "*.jar" | sort)
+            COMPILER_CP="$COMPILER_CP:$jar"
+          done < <(
+            find compiler/lib \
+              -type f \
+              -name "*.jar" \
+              | sort
+          )
 
           echo "COMPILER_CP=$COMPILER_CP" >> "$GITHUB_ENV"
 
-          echo "Compiler classpath contains:"
+          echo "=========================================="
+          echo "Compiler classpath"
+          echo "=========================================="
+
           echo "$COMPILER_CP" | tr ':' '\n'
 
       - name: Check compiler version
         run: |
+          echo "Starting existing Kotlin compiler..."
+
           java -cp "$COMPILER_CP" \
             org.jetbrains.kotlin.cli.jvm.K2JVMCompiler \
             -version
 
-      - name: Create Kotlin test sources
+      - name: Create Kotlin test source
         run: |
           mkdir -p test-src test-out
 
@@ -131,6 +155,9 @@ jobs:
           }
           EOF
 
+          echo "Test source:"
+          cat test-src/Main.kt
+
       - name: Compile Kotlin test
         run: |
           java -cp "$COMPILER_CP" \
@@ -141,8 +168,11 @@ jobs:
 
           test -f test-out/MainKt.class
 
+          echo
           echo "Kotlin compilation successful."
 
+          echo
+          echo "Generated files:"
           find test-out -type f -print
 
       - name: Run compiled Kotlin program
@@ -150,8 +180,15 @@ jobs:
           RUNTIME_CP="test-out"
 
           while IFS= read -r jar; do
-              RUNTIME_CP="$RUNTIME_CP:$jar"
-          done < <(find compiler/lib -type f -name "*.jar" | sort)
+            RUNTIME_CP="$RUNTIME_CP:$jar"
+          done < <(
+            find compiler/lib \
+              -type f \
+              -name "*.jar" \
+              | sort
+          )
+
+          echo "Running compiled program..."
 
           java -cp "$RUNTIME_CP" MainKt
 
@@ -165,7 +202,9 @@ jobs:
           }
           EOF
 
-          javac -d test-out test-src/JavaInterop.java
+          javac \
+            -d test-out \
+            test-src/JavaInterop.java
 
           cat > test-src/Interop.kt <<'EOF'
           fun main() {
@@ -179,11 +218,18 @@ jobs:
             -d test-out \
             test-src/Interop.kt
 
+          test -f test-out/InteropKt.class
+
           RUNTIME_CP="test-out"
 
           while IFS= read -r jar; do
-              RUNTIME_CP="$RUNTIME_CP:$jar"
-          done < <(find compiler/lib -type f -name "*.jar" | sort)
+            RUNTIME_CP="$RUNTIME_CP:$jar"
+          done < <(
+            find compiler/lib \
+              -type f \
+              -name "*.jar" \
+              | sort
+          )
 
           java -cp "$RUNTIME_CP" InteropKt
 
@@ -192,25 +238,41 @@ jobs:
           test -s test-out/MainKt.class
           test -s test-out/InteropKt.class
 
-          echo "MainKt:"
-          javap -classpath test-out MainKt
+          echo "=========================================="
+          echo "MainKt bytecode"
+          echo "=========================================="
+
+          javap \
+            -classpath test-out \
+            MainKt
 
           echo
-          echo "InteropKt:"
-          javap -classpath test-out InteropKt
+          echo "=========================================="
+          echo "InteropKt bytecode"
+          echo "=========================================="
+
+          javap \
+            -classpath test-out \
+            InteropKt
 
       - name: Final result
         run: |
+          echo
           echo "=========================================="
           echo " EXISTING KOTLIN COMPILER TEST PASSED"
           echo "=========================================="
-          echo "Existing kotlinc.jar:        OK"
-          echo "Gradle dependency resolution: OK"
-          echo "Compiler startup:             OK"
-          echo "Kotlin compilation:           OK"
-          echo "BigInteger test:              OK"
-          echo "Collections/lambda test:      OK"
-          echo "JVM execution:                OK"
-          echo "Java interoperability:        OK"
-          echo "Bytecode generation:          OK"
+          echo
+          echo "Existing kotlinc.jar:          OK"
+          echo "Artifact download:             OK"
+          echo "Gradle dependency resolution:  OK"
+          echo "Compiler startup:              OK"
+          echo "Kotlin compilation:            OK"
+          echo "BigInteger test:               OK"
+          echo "Collections/lambda test:       OK"
+          echo "JVM execution:                 OK"
+          echo "Java interoperability:         OK"
+          echo "Bytecode generation:            OK"
+          echo
+          echo "The existing compiler JAR is"
+          echo "ready for the next integration test."
           echo "=========================================="
